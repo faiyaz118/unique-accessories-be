@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-typecheck-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+      # Generates the Prisma Client from prisma/schema.prisma. This does not
+      # need a live database connection, so it works without a Postgres
+      # service in this job. DATABASE_URL just needs to be a syntactically
+      # valid URL for prisma.config.ts to resolve — no connection is made.
+      - run: pnpm exec prisma generate
+        env:
+          DATABASE_URL: "postgresql://user:pass@localhost:5432/db?schema=public"
+
+      - run: pnpm typecheck
+        env:
+          DATABASE_URL: "postgresql://user:pass@localhost:5432/db?schema=public"
+
+      - run: pnpm build
+        env:
+          DATABASE_URL: "postgresql://user:pass@localhost:5432/db?schema=public"
+
+      # Deliberately not run here: db:migrate / db:seed. Those need a real
+      # Postgres instance — add a `services: postgres:` block and run
+      # `pnpm db:migrate:deploy && pnpm db:seed` if/when this should verify
+      # against a live database.

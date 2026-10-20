@@ -1,0 +1,372 @@
+// Unique Accessories — database schema
+// Source of truth doc: ../../doc/phases/02-database-schema.md
+// This file matches that doc's model shapes closely; deviations from it are
+// noted inline with `// DOC-DIFF:` and summarized at the bottom of the doc.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7+: the connection URL lives in prisma.config.ts, not here.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Users & Auth
+// ---------------------------------------------------------------------------
+
+enum Role {
+  CUSTOMER
+  ADMIN
+  SUPPORT
+}
+
+model User {
+  id        String   @id // app-generated UUID until Supabase Auth supplies auth.users.id
+  email     String   @unique
+  fullName  String?
+  role      Role     @default(CUSTOMER)
+  // Local password auth. Null for seed/demo users and, later, OAuth-only accounts.
+  blocked            Boolean  @default(false)
+  passwordHash       String?
+  emailVerifiedAt    DateTime?
+  emailVerifyToken   String?   @unique
+  emailVerifyExpires DateTime?
+  resetToken         String?   @unique
+  resetExpires       DateTime?
+  addresses Address[]
+  orders    Order[]
+  reviews   Review[]
+  wishlist  Wishlist?
+  cart      Cart? // DOC-DIFF: added so a logged-in user's cart is a real relation, not just a bare scalar
+  createdAt DateTime @default(now())
+}
+
+model Address {
+  id        String  @id @default(cuid())
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  line1     String
+  line2     String?
+  city      String
+  state     String
+  pincode   String
+  phone     String
+  isDefault Boolean @default(false)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Catalog taxonomy
+// ---------------------------------------------------------------------------
+
+model Category {
+  id            String        @id @default(cuid())
+  name          String // "Mobile Accessories" | "Car Accessories"
+  slug          String        @unique
+  description   String?
+  icon          String? // lucide-react icon name, mirrors frontend's mock data shape
+  subcategories Subcategory[]
+}
+
+model Subcategory {
+  id          String    @id @default(cuid())
+  category    Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  categoryId  String
+  name        String // "Covers", "Earphones", "Chargers", "Car Mounts"...
+  slug        String    @unique
+  description String?
+  icon        String?
+  products    Product[]
+
+  @@index([categoryId])
+}
+
+enum DeviceType {
+  PHONE
+  CAR
+}
+
+model Brand {
+  id     String        @id @default(cuid())
+  name   String // "Apple", "Samsung", "Maruti Suzuki"
+  type   DeviceType
+  models DeviceModel[]
+
+  @@index([type])
+}
+
+model DeviceModel {
+  id            String                 @id @default(cuid())
+  brand         Brand                  @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  brandId       String
+  name          String // "iPhone 15 Pro", "Swift 2023"
+  type          DeviceType
+  compatibility ProductCompatibility[]
+
+  @@index([brandId])
+  @@index([name])
+  @@index([type])
+}
+
+// ---------------------------------------------------------------------------
+// Products
+// ---------------------------------------------------------------------------
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+// DOC-DIFF: "Bestseller"/"New"/"Sale" as an admin-set merchandising flag,
+// rather than a computed rule — matches the frontend's current mock shape.
+// Reassess in phase 04/09 once real sales-rank/recency data exists.
+enum ProductBadge {
+  BESTSELLER
+  NEW
+  SALE
+}
+
+model Product {
+  id               String                 @id @default(cuid())
+  subcategory      Subcategory            @relation(fields: [subcategoryId], references: [id])
+  subcategoryId    String
+  name             String
+  slug             String                 @unique
+  shortDescription String // DOC-DIFF: doc only had `description`; frontend PLP/meta copy needs a short + long form
+  description      String
+  features         String[] // DOC-DIFF: specification bullet list, shown in the frontend's Specifications tab
+  status           ProductStatus          @default(DRAFT)
+  badge            ProductBadge? // DOC-DIFF: see ProductBadge enum note above
+
+  // DOC-DIFF: denormalized rating aggregate for fast reads on PLP/PDP.
+  // Recomputed from Review rows once phase 10 ships; until then it's seeded
+  // directly (same numbers the frontend mock currently shows).
+  ratingAverage Decimal @default(0) @db.Decimal(2, 1)
+  ratingCount   Int     @default(0)
+
+  // DOC-DIFF: temporary stand-ins for real photography (phase 04). Mirrors
+  // the frontend's ProductVisual component (icon + color theme placeholder).
+  // Drop these once every product has real ProductImage rows.
+  placeholderIcon  String?
+  placeholderTheme String?
+
+  variants      ProductVariant[]
+  images        ProductImage[]
+  compatibility ProductCompatibility[]
+  reviews       Review[]
+  wishlistedBy  WishlistItem[] // DOC-DIFF: added so WishlistItem can hold a real relation, not just a bare productId
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  @@index([subcategoryId])
+  @@index([status])
+}
+
+model ProductVariant {
+  id         String         @id @default(cuid())
+  product    Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId  String
+  sku        String         @unique
+  color      String?
+  colorHex   String? // DOC-DIFF: swatch color for the frontend's variant selector
+  material   String?
+  capacity   String? // e.g. power bank mAh
+  price      Decimal        @db.Decimal(10, 2)
+  compareAt  Decimal?       @db.Decimal(10, 2)
+  inventory  Inventory?
+  images     ProductImage[]
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([productId])
+}
+
+model Inventory {
+  id        String         @id @default(cuid())
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId String         @unique
+  quantity  Int            @default(0)
+  reserved  Int            @default(0) // held during checkout, released or decremented on payment resolution
+}
+
+model ProductImage {
+  id        String          @id @default(cuid())
+  product   Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId String?
+  url       String // R2/CDN URL — phase 04
+  altText   String?
+  position  Int             @default(0)
+
+  @@index([productId])
+}
+
+model ProductCompatibility {
+  id            String      @id @default(cuid())
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId     String
+  deviceModel   DeviceModel @relation(fields: [deviceModelId], references: [id], onDelete: Cascade)
+  deviceModelId String
+
+  @@unique([productId, deviceModelId])
+  @@index([deviceModelId])
+}
+
+// ---------------------------------------------------------------------------
+// Cart & Checkout
+// ---------------------------------------------------------------------------
+
+model Cart {
+  id        String     @id @default(cuid())
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade) // DOC-DIFF: see User.cart note
+  userId    String?    @unique // null for guest carts (session-based)
+  sessionId String?    @unique
+  items     CartItem[]
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id        String         @id @default(cuid())
+  cart      Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  cartId    String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variantId String
+  quantity  Int
+
+  @@unique([cartId, variantId]) // DOC-DIFF: prevents duplicate lines for the same variant; merge quantity instead
+}
+
+enum OrderStatus {
+  PLACED
+  CONFIRMED
+  PACKED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RETURNED
+  REFUNDED
+}
+
+model Order {
+  id              String               @id @default(cuid())
+  user            User                 @relation(fields: [userId], references: [id])
+  userId          String
+  status          OrderStatus          @default(PLACED)
+  items           OrderItem[]
+  statusHistory   OrderStatusHistory[]
+  payment         Payment?
+  couponCode      String?
+  subtotal        Decimal              @db.Decimal(10, 2)
+  discount        Decimal              @default(0) @db.Decimal(10, 2)
+  shippingFee     Decimal              @default(0) @db.Decimal(10, 2)
+  total           Decimal              @db.Decimal(10, 2)
+  shippingAddress Json
+  createdAt       DateTime             @default(now())
+
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id        String         @id @default(cuid())
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+  variantId String
+  quantity  Int
+  unitPrice Decimal        @db.Decimal(10, 2) // snapshot at purchase time
+
+  @@index([orderId])
+}
+
+model OrderStatusHistory {
+  id        String      @id @default(cuid())
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  @@index([orderId])
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id               String        @id @default(cuid())
+  order            Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId          String        @unique
+  gateway          String // "razorpay"
+  gatewayOrderId   String
+  gatewayPaymentId String?
+  status           PaymentStatus @default(PENDING)
+  amount           Decimal       @db.Decimal(10, 2)
+  createdAt        DateTime      @default(now())
+}
+
+// DOC-DIFF: enum instead of a free-text String, for type safety — matches
+// the frontend's Coupon.type union type already.
+enum CouponType {
+  PERCENT
+  FLAT
+}
+
+model Coupon {
+  id            String     @id @default(cuid())
+  code          String     @unique
+  type          CouponType
+  value         Decimal    @db.Decimal(10, 2)
+  minOrderValue Decimal?   @db.Decimal(10, 2)
+  description   String? // DOC-DIFF: shown to the customer on apply, matches frontend mock
+  active        Boolean    @default(true)
+  expiresAt     DateTime?
+  usageLimit    Int?
+}
+
+// ---------------------------------------------------------------------------
+// Reviews & Wishlist
+// ---------------------------------------------------------------------------
+
+model Review {
+  id        String   @id @default(cuid())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  rating    Int // 1-5
+  title     String? // DOC-DIFF: short headline, matches frontend mock shape
+  comment   String?
+  verified  Boolean  @default(false) // only after delivered order — see phase 10
+  approved  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+  @@index([userId])
+}
+
+model Wishlist {
+  id     String         @id @default(cuid())
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String         @unique
+  items  WishlistItem[]
+}
+
+model WishlistItem {
+  id         String   @id @default(cuid())
+  wishlist   Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  wishlistId String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade) // DOC-DIFF: see Product.wishlistedBy note
+  productId  String
+
+  @@unique([wishlistId, productId])
+}
